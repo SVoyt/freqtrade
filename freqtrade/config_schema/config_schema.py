@@ -1032,6 +1032,14 @@ CONF_SCHEMA = {
                     "type": "integer",
                     "default": 60,
                 },
+                "hedge_mode": {
+                    "description": (
+                        "Bitget only: use hedge-mode order params on a hedge-mode account "
+                        "(e.g. copytrading). Freqtrade still opens only one side per pair."
+                    ),
+                    "type": "boolean",
+                    "default": False,
+                },
                 "ccxt_config": {"description": "CCXT configuration settings.", "type": "object"},
                 "ccxt_async_config": {
                     "description": (

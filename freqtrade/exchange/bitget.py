@@ -7,6 +7,7 @@ from freqtrade.constants import BuySell
 from freqtrade.enums import OPTIMIZE_MODES, CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import (
     DDosProtection,
+    ExchangeError,
     InvalidOrderException,
     OperationalException,
     RetryableOrderError,
@@ -53,8 +54,20 @@ class Bitget(Exchange):
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
         (TradingMode.SPOT, MarginMode.NONE),
         (TradingMode.FUTURES, MarginMode.ISOLATED),
-        # (TradingMode.FUTURES, MarginMode.CROSS),
+        # Cross is required for copytrading / hedge-mode accounts (isolated is rejected).
+        (TradingMode.FUTURES, MarginMode.CROSS),
     ]
+
+    # When True, place futures orders with CCXT hedged=True (hedge-mode account)
+    # while freqtrade still keeps one open trade per pair (one-way bot behavior).
+    # Needed for Bitget copytrading accounts, which only support hedge mode.
+    hedge_mode: bool = False
+
+    # Copytrading accounts reject regular set-margin-mode / set-leverage calls with
+    # error 40731 ("This product does not support copy trading").
+    # Once detected, skip further calls to the respective endpoint.
+    _ct_margin_mode_unavailable: bool = False
+    _ct_leverage_unavailable: bool = False
 
     def ohlcv_candle_limit(
         self, timeframe: str, candle_type: CandleType, since_ms: int | None = None
@@ -165,11 +178,31 @@ class Bitget(Exchange):
         .api will be available at this point.
         Must be overridden in child methods if required.
         """
+        self.hedge_mode = bool(self._config["exchange"].get("hedge_mode", False))
+        if self.hedge_mode and self.trading_mode == TradingMode.FUTURES:
+            # Elite / copytrading accounts reject isolated ("fixedMargin") with error 25200
+            # and only support cross margin + hedge mode.
+            # https://www.bitget.com/api-doc/uta/copy/Elite-Trading-API-Guide
+            if self.margin_mode == MarginMode.ISOLATED:
+                logger.warning(
+                    "Bitget: copytrading / hedge_mode accounts only support cross margin "
+                    "(isolated is rejected with 25200). Overriding margin_mode to cross."
+                )
+                self.margin_mode = MarginMode.CROSS
+                self._config["margin_mode"] = MarginMode.CROSS
         try:
             if not self._config["dry_run"]:
                 if self.trading_mode == TradingMode.FUTURES:
-                    position_mode = self._api.set_position_mode(False)
-                    self._log_exchange_response("set_position_mode", position_mode)
+                    if self.hedge_mode:
+                        # Copytrading / hedge-only accounts cannot switch to one-way mode.
+                        # Assume the account is already in hedge mode and tag orders accordingly.
+                        logger.info(
+                            "Bitget: hedge_mode enabled. Using hedge-mode order params "
+                            "(cross margin); freqtrade still opens only one position side per pair."
+                        )
+                    else:
+                        position_mode = self._api.set_position_mode(False)
+                        self._log_exchange_response("set_position_mode", position_mode)
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
@@ -195,8 +228,98 @@ class Bitget(Exchange):
             time_in_force=time_in_force,
         )
         if self.trading_mode == TradingMode.FUTURES and self.margin_mode:
-            params["marginMode"] = self.margin_mode.value.lower()
+            if self.margin_mode == MarginMode.ISOLATED:
+                params["marginMode"] = self.margin_mode.value.lower()
+            # CROSS: do not pass marginMode.
+            # Bitget's enum is "isolated" | "crossed". Freqtrade's value is "cross".
+            # ccxt maps that to "crossed", then merges leftover params back onto the
+            # request, so "cross" overwrites it and Bitget returns 40034
+            # ("Parameter cross does not exist"). Omitting the param lets ccxt default
+            # to crossed.
+            if self.hedge_mode:
+                # CCXT maps hedged + reduceOnly to tradeSide open/close and posSide.
+                params["hedged"] = True
         return params
+
+    def _get_stop_params(self, side: BuySell, ordertype: str, stop_price: float) -> dict:
+        params = super()._get_stop_params(side, ordertype, stop_price)
+        if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:
+            params["hedged"] = True
+        return params
+
+    def _lev_prep(self, pair: str, leverage: float, side: BuySell, accept_fail: bool = False):
+        if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:
+            if not self._ct_margin_mode_unavailable:
+                try:
+                    self.set_margin_mode(pair, self.margin_mode, accept_fail)
+                except TemporaryError as e:
+                    if "40731" not in str(e):
+                        raise
+                    # Copytrading accounts don't support changing the margin mode.
+                    self._ct_margin_mode_unavailable = True
+                    logger.warning(
+                        "Bitget: This account does not allow setting the margin mode via API "
+                        "(copytrading). The account must stay in cross margin mode."
+                    )
+            self._set_leverage(leverage, pair, accept_fail)
+            return
+        super()._lev_prep(pair, leverage, side, accept_fail)
+
+    def _set_leverage(
+        self,
+        leverage: float,
+        pair: str | None = None,
+        accept_fail: bool = False,
+        params: dict | None = None,
+    ):
+        if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:
+            if self._ct_leverage_unavailable:
+                return
+            # In isolated hedge mode, bitget requires either "holdSide",
+            # or both longLeverage and shortLeverage to be set at once
+            # (in which case holdSide is not needed).
+            # Set both sides to the same leverage to keep one call per entry.
+            # https://www.bitget.com/api-doc/contract/account/Change-Leverage
+            leverage_str = f"{leverage:g}"
+            params = {
+                **(params or {}),
+                "longLeverage": leverage_str,
+                "shortLeverage": leverage_str,
+            }
+            try:
+                super()._set_leverage(leverage, pair, accept_fail, params)
+            except TemporaryError as e:
+                if "40731" not in str(e):
+                    raise
+                # Copytrading accounts don't support changing leverage via this endpoint.
+                self._ct_leverage_unavailable = True
+                logger.warning(
+                    "Bitget: This account does not allow setting leverage via API "
+                    "(copytrading). Freqtrade will not set leverage on the exchange - "
+                    "make sure the leverage configured on bitget matches the leverage "
+                    "used by your strategy."
+                )
+            return
+        super()._set_leverage(leverage, pair, accept_fail, params)
+
+    def get_funding_fees(
+        self, pair: str, amount: float, is_short: bool, open_date: datetime
+    ) -> float:
+        """
+        Copytrading accounts reject fetch_funding_history with error 40731.
+        Calculate fees from public funding-rate / mark-price history instead.
+        """
+        if (
+            self.trading_mode == TradingMode.FUTURES
+            and self.hedge_mode
+            and not self._config["dry_run"]
+        ):
+            try:
+                return self._fetch_and_calculate_funding_fees(pair, amount, is_short, open_date)
+            except ExchangeError:
+                logger.warning(f"Could not update funding fees for {pair}.")
+                return 0.0
+        return super().get_funding_fees(pair, amount, is_short, open_date)
 
     def dry_run_liquidation_price(
         self,
@@ -247,7 +370,13 @@ class Bitget(Exchange):
         ).get("taker", 0.001)
         mm_ratio, _ = self.get_maintenance_ratio_and_amt(pair, stake_amount)
 
-        if self.trading_mode == TradingMode.FUTURES and self.margin_mode == MarginMode.ISOLATED:
+        if self.trading_mode == TradingMode.FUTURES and self.margin_mode in (
+            MarginMode.ISOLATED,
+            MarginMode.CROSS,
+        ):
+            # Isolated: wallet_balance is position margin.
+            # Cross: wallet_balance is account equity. Same formula; live trading uses
+            # the exchange-provided liquidationPrice from fetch_positions instead.
             position_direction = -1 if is_short else 1
 
             return (wallet_balance - (amount * open_rate * position_direction)) / (
@@ -255,7 +384,7 @@ class Bitget(Exchange):
             )
         else:
             raise OperationalException(
-                "Freqtrade currently only supports isolated futures for bitget"
+                "Freqtrade currently only supports isolated or cross futures for bitget"
             )
 
     def check_delisting_time(self, pair: str) -> datetime | None:

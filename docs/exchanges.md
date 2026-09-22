@@ -379,9 +379,28 @@ Bitget supports [time_in_force](configuration.md#understand-order_time_in_force)
 
 ### Bitget Futures
 
-Futures trading on bitget is supported for isolated futures mode.
+Futures trading on bitget is supported for isolated and cross futures mode. Isolated is the default for regular futures accounts. Bitget copytrading / elite-trading accounts only support **cross** margin.
 
-On startup, freqtrade will set the position mode to "One-way Mode" for the whole (sub)account. This avoids making this call over and over again (slowing down bot operations), but means that manual changes to this setting may result in exceptions and errors.
+By default, on startup freqtrade will set the position mode to "One-way Mode" for the whole (sub)account. This avoids making this call over and over again (slowing down bot operations), but means that manual changes to this setting may result in exceptions and errors.
+
+!!! Note "Copytrading / hedge-mode accounts"
+    Bitget copytrading (elite trading) accounts only support **hedge mode** and **cross margin**. Isolated margin (`fixedMargin`) is rejected with error 25200. Freqtrade still uses one-way bot behavior (only one open trade / position side per pair), but order params must match the account.
+
+    Enable this with:
+
+    ```json
+    "trading_mode": "futures",
+    "margin_mode": "cross",
+    "exchange": {
+        "name": "bitget",
+        "hedge_mode": true,
+        // ...
+    }
+    ```
+
+    When `hedge_mode` is `true`, freqtrade does **not** switch the account to one-way mode, passes CCXT `hedged=true` on futures entry, exit, and stoploss orders, and uses cross margin. If `margin_mode` is still `isolated` in the config, freqtrade overrides it to `cross`.
+
+    Copytrading accounts reject regular margin-mode, leverage, and funding-history API calls with error 40731 ("This product does not support copy trading"). Freqtrade detects this, stops calling the account endpoints, and calculates funding fees from public funding rates instead. Make sure the leverage configured on bitget matches the leverage your strategy uses.
 
 ## Hyperliquid
 

@@ -3794,6 +3794,7 @@ class Exchange:
         leverage: float,
         pair: str | None = None,
         accept_fail: bool = False,
+        params: dict | None = None,
     ):
         """
         Set's the leverage before making a trade, in order to not
@@ -3806,7 +3807,7 @@ class Exchange:
             # Rounding for binance ...
             leverage = floor(leverage)
         try:
-            res = self._api.set_leverage(symbol=pair, leverage=leverage)
+            res = self._api.set_leverage(symbol=pair, leverage=leverage, params=params or {})
             self._log_exchange_response("set_leverage", res)
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
