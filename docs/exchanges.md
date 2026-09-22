@@ -400,7 +400,7 @@ By default, on startup freqtrade will set the position mode to "One-way Mode" fo
 
     When `hedge_mode` is `true`, freqtrade does **not** switch the account to one-way mode, passes CCXT `hedged=true` on futures entry, exit, and stoploss orders, and uses cross margin. If `margin_mode` is still `isolated` in the config, freqtrade overrides it to `cross`.
 
-    Copytrading accounts reject regular margin-mode, leverage, and funding-history API calls with error 40731 ("This product does not support copy trading"). Freqtrade detects this, stops calling the account endpoints, and calculates funding fees from public funding rates instead. Make sure the leverage configured on bitget matches the leverage your strategy uses.
+    Copytrading accounts reject regular margin-mode, leverage, funding-history, and my-trades API calls with error 40731 ("This product does not support copy trading"). Freqtrade detects this, stops calling those endpoints, calculates funding fees from public funding rates, and keeps the market default fee rate when Bitget returns `fee=0` on the order (otherwise profit is shown without fees). Make sure the leverage configured on bitget matches the leverage your strategy uses.
 
 ## Hyperliquid
 

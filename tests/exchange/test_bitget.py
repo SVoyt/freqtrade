@@ -376,6 +376,47 @@ def test_fill_missing_order_price_bitget(default_conf, mocker):
     assert exchange._fill_missing_order_price(untouched)["price"] == 1.2
 
 
+def test_normalize_ccxt_order_bitget_fee_and_hedge_side(default_conf, mocker):
+    exchange = get_patched_exchange(mocker, default_conf, exchange="bitget")
+
+    zero_fee = {
+        "id": "1",
+        "side": "buy",
+        "price": 1.0,
+        "fee": {"cost": 0.0, "currency": "USDT"},
+        "info": {"fee": "0", "posMode": "hedge_mode", "tradeSide": "close", "side": "buy"},
+    }
+    zero_fee = exchange._normalize_ccxt_order(zero_fee)
+    assert zero_fee["fee"] is None
+    assert zero_fee["side"] == "sell"
+    assert zero_fee["reduceOnly"] is True
+
+    real_fee = {
+        "id": "2",
+        "side": "buy",
+        "price": 1.0,
+        "fee": {"cost": 0.0, "currency": "USDT"},
+        "info": {"fee": "-0.012", "marginCoin": "USDT", "posMode": "one_way_mode"},
+    }
+    real_fee = exchange._normalize_ccxt_order(real_fee)
+    assert real_fee["fee"]["cost"] == 0.012
+    assert real_fee["fee"]["currency"] == "USDT"
+    assert real_fee["side"] == "buy"
+
+
+def test_get_trades_for_order_bitget_hedge_mode_skips_private_history(default_conf, mocker):
+    api_mock = MagicMock()
+    api_mock.fetch_my_trades = MagicMock(return_value=[{"order": "1"}])
+    default_conf["dry_run"] = False
+    default_conf["trading_mode"] = TradingMode.FUTURES
+    default_conf["margin_mode"] = MarginMode.ISOLATED
+    default_conf["exchange"]["hedge_mode"] = True
+    exchange = get_patched_exchange(mocker, default_conf, exchange="bitget", api_mock=api_mock)
+
+    assert exchange.get_trades_for_order("1", "ETH/USDT:USDT", dt_now()) == []
+    assert api_mock.fetch_my_trades.call_count == 0
+
+
 def test_dry_run_liquidation_price_cross_bitget(default_conf, mocker):
     default_conf["dry_run"] = True
     default_conf["trading_mode"] = TradingMode.FUTURES

@@ -249,7 +249,13 @@ class Bitget(Exchange):
 
     def _order_contracts_to_amount(self, order: CcxtOrder) -> CcxtOrder:
         order = super()._order_contracts_to_amount(order)
-        return self._fill_missing_order_price(order)
+        return self._normalize_ccxt_order(order)
+
+    def _normalize_ccxt_order(self, order: CcxtOrder) -> CcxtOrder:
+        self._fill_missing_order_price(order)
+        self._normalize_hedge_close_side(order)
+        self._drop_placeholder_order_fee(order)
+        return order
 
     @staticmethod
     def _fill_missing_order_price(order: CcxtOrder) -> CcxtOrder:
@@ -286,6 +292,55 @@ class Bitget(Exchange):
             if not order.get("price"):
                 order["price"] = price
         return order
+
+    @staticmethod
+    def _normalize_hedge_close_side(order: CcxtOrder) -> None:
+        """
+        Hedge-mode closes use tradeSide=close and keep the position side (buy=long).
+        CCXT only flips side when reduceOnly=YES, which Bitget often leaves as NO.
+        Without the flip, an exit is treated as another entry and close fees are skipped.
+        """
+        info = order.get("info") or {}
+        pos_mode = info.get("posMode") or info.get("holdMode")
+        trade_side = str(info.get("tradeSide") or "").lower()
+        if pos_mode != "hedge_mode" or trade_side != "close":
+            return
+        raw_side = info.get("side")
+        if raw_side in ("buy", "sell") and order.get("side") == raw_side:
+            order["side"] = "sell" if raw_side == "buy" else "buy"
+        order["reduceOnly"] = True
+
+    @staticmethod
+    def _drop_placeholder_order_fee(order: CcxtOrder) -> None:
+        """
+        fetch_orders often returns fee=0. Freqtrade treats that as a real 0% rate and
+        overwrites the exchange default, so profit is shown without fees.
+        """
+        fee = order.get("fee")
+        cost = fee.get("cost") if isinstance(fee, dict) else None
+        info = order.get("info") or {}
+        raw = info.get("fee")
+        try:
+            raw_abs = abs(float(raw)) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            raw_abs = None
+        if raw_abs:
+            currency = (fee or {}).get("currency") if isinstance(fee, dict) else None
+            order["fee"] = {
+                "cost": raw_abs,
+                "currency": currency or info.get("marginCoin") or "USDT",
+            }
+            return
+        if cost is None or abs(float(cost)) == 0:
+            order["fee"] = None
+
+    def get_trades_for_order(
+        self, order_id: str, pair: str, since: datetime, params: dict | None = None
+    ) -> list:
+        # Copytrading rejects fetch_my_trades with 40731; don't retry it.
+        if self.hedge_mode and not self._config["dry_run"]:
+            return []
+        return super().get_trades_for_order(order_id, pair, since, params)
 
     def _lev_prep(self, pair: str, leverage: float, side: BuySell, accept_fail: bool = False):
         if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:

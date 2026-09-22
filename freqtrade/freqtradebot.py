@@ -2556,9 +2556,17 @@ class FreqtradeBot(LoggingMixin):
         Necessary for exchanges which charge fees in base currency (e.g. binance)
         :return: Absolute fee to apply for this order or None
         """
+        # Prefer freqtrade's order side: Bitget hedge-mode closes are returned as
+        # buy/sell of the position, which does not match entry/exit.
+        fee_side = order_obj.ft_order_side
+        if fee_side == "stoploss":
+            fee_side = trade.exit_side
+        elif fee_side not in ("buy", "sell"):
+            fee_side = order.get("side", "")
+
         # Only run for closed orders
         if (
-            trade.fee_updated(order.get("side", "")) or order["status"] == "open"
+            trade.fee_updated(fee_side) or order["status"] == "open"
             # or order_obj.ft_fee_base
         ):
             return None
@@ -2578,7 +2586,7 @@ class FreqtradeBot(LoggingMixin):
                 # Reject all fees that report as > 2%.
                 # These are most likely caused by a parsing bug in ccxt
                 # due to multiple trades (https://github.com/ccxt/ccxt/issues/8025)
-                trade.update_fee(fee_cost, fee_currency, fee_rate, order.get("side", ""))
+                trade.update_fee(fee_cost, fee_currency, fee_rate, fee_side)
                 trade_base_currency = self.exchange.get_pair_base_currency(trade.pair)
                 if trade_base_currency == fee_currency:
                     # Apply fee to amount
@@ -2591,7 +2599,7 @@ class FreqtradeBot(LoggingMixin):
                     )
                 return None
         return self.fee_detection_from_trades(
-            trade, order, order_obj, order_amount, order.get("trades", [])
+            trade, order, order_obj, order_amount, order.get("trades", []), fee_side
         )
 
     def _trades_valid_for_fee(self, trades: list[dict[str, Any]]) -> bool:
@@ -2607,7 +2615,13 @@ class FreqtradeBot(LoggingMixin):
         return True
 
     def fee_detection_from_trades(
-        self, trade: Trade, order: CcxtOrder, order_obj: Order, order_amount: float, trades: list
+        self,
+        trade: Trade,
+        order: CcxtOrder,
+        order_obj: Order,
+        order_amount: float,
+        trades: list,
+        fee_side: str | None = None,
     ) -> float | None:
         """
         fee-detection fallback to Trades.
@@ -2650,10 +2664,13 @@ class FreqtradeBot(LoggingMixin):
             fee_rate = sum(fee_rate_array) / float(len(fee_rate_array)) if fee_rate_array else None
             if fee_rate is not None and fee_rate < 0.02:
                 # Only update if fee-rate is < 2%
-                trade.update_fee(fee_cost, fee_currency, fee_rate, order.get("side", ""))
+                trade.update_fee(
+                    fee_cost, fee_currency, fee_rate, fee_side or order.get("side", "")
+                )
             else:
                 logger.warning(
-                    f"Not updating {order.get('side', '')}-fee - rate: {fee_rate}, {fee_currency}."
+                    f"Not updating {fee_side or order.get('side', '')}-fee - "
+                    f"rate: {fee_rate}, {fee_currency}."
                 )
 
         if not isclose(amount, order_amount, abs_tol=constants.MATH_CLOSE_PREC):
