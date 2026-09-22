@@ -5178,6 +5178,57 @@ def test_handle_onexchange_order_rollback(mocker, default_conf_usdt, fee, caplog
     assert len(Trade.get_trades().all()) == 7
 
 
+@pytest.mark.usefixtures("init_persistence")
+def test_handle_onexchange_order_missing_price(
+    mocker, default_conf_usdt, limit_order, caplog
+):
+    default_conf_usdt["dry_run"] = False
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    entry_order = limit_order["buy"]
+    exit_order = deepcopy(limit_order["sell"])
+    exit_order.update(
+        {
+            "id": "1486157351139524608",
+            "type": "market",
+            "price": None,
+            "average": None,
+            "cost": None,
+            "status": "closed",
+            "filled": exit_order["amount"],
+            "remaining": 0.0,
+        }
+    )
+    mocker.patch(f"{EXMS}.fetch_orders", return_value=[entry_order, exit_order])
+    mocker.patch(f"{EXMS}.fetch_order", return_value=exit_order)
+
+    trade = Trade(
+        pair="ETH/USDT",
+        fee_open=0.001,
+        fee_close=0.001,
+        open_rate=entry_order["price"],
+        open_date=dt_now(),
+        stake_amount=entry_order["cost"],
+        amount=entry_order["amount"],
+        exchange="binance",
+        is_short=False,
+        leverage=1,
+    )
+    trade.orders.append(Order.parse_from_ccxt_object(entry_order, trade.pair, "buy"))
+    Trade.session.add(trade)
+    Trade.commit()
+
+    assert freqtrade.handle_onexchange_order(trade) is False
+    assert log_has_re(r"Found previously unknown order .*", caplog)
+    assert log_has_re(r"Order .* has no price; using trade open rate", caplog)
+
+    trade = Trade.session.scalars(select(Trade)).first()
+    unknown = [o for o in trade.orders if o.order_id == "1486157351139524608"]
+    assert len(unknown) == 1
+    assert unknown[0].ft_price == trade.open_rate
+    assert unknown[0].ft_order_side == "sell"
+
+
 def test_get_valid_price(mocker, default_conf_usdt) -> None:
     patch_RPCManager(mocker)
     patch_exchange(mocker)

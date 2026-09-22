@@ -247,6 +247,46 @@ class Bitget(Exchange):
             params["hedged"] = True
         return params
 
+    def _order_contracts_to_amount(self, order: CcxtOrder) -> CcxtOrder:
+        order = super()._order_contracts_to_amount(order)
+        return self._fill_missing_order_price(order)
+
+    @staticmethod
+    def _fill_missing_order_price(order: CcxtOrder) -> CcxtOrder:
+        """
+        Bitget market / hedge-mode close orders often come back with empty price and
+        priceAvg. Recover average/price/cost from info or cost/filled so persistence
+        can store ft_price.
+        """
+        if order.get("price") or order.get("average"):
+            return order
+
+        info = order.get("info") or {}
+        raw_avg = info.get("priceAvg") or info.get("fillPrice") or info.get("priceAvgPx")
+        try:
+            avg = float(raw_avg) if raw_avg not in (None, "") else None
+        except (TypeError, ValueError):
+            avg = None
+
+        filled = order.get("filled") or 0.0
+        cost = order.get("cost")
+        if not cost:
+            raw_cost = info.get("quoteVolume") or info.get("quoteSize")
+            try:
+                cost = float(raw_cost) if raw_cost not in (None, "") else None
+            except (TypeError, ValueError):
+                cost = None
+            if cost:
+                order["cost"] = cost
+
+        price = avg or ((cost / filled) if cost and filled else None)
+        if price:
+            if not order.get("average"):
+                order["average"] = price
+            if not order.get("price"):
+                order["price"] = price
+        return order
+
     def _lev_prep(self, pair: str, leverage: float, side: BuySell, accept_fail: bool = False):
         if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:
             if not self._ct_margin_mode_unavailable:

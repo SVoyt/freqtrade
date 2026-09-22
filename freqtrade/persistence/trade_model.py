@@ -337,6 +337,22 @@ class Order(ModelBase):
         else:
             logger.warning(f"Did not find order for {order}.")
 
+    @staticmethod
+    def price_from_ccxt(order: dict, price: float | None = None) -> float | None:
+        """
+        Best available price from a ccxt order.
+        Market orders (especially Bitget hedge/copytrading closes) often have
+        price=None and average=None; fall back to cost/filled.
+        """
+        filled = order.get("filled") or 0.0
+        cost = order.get("cost")
+        for candidate in (price, order.get("average"), order.get("price"), order.get("stopPrice")):
+            if candidate:
+                return float(candidate)
+        if cost and filled:
+            return float(cost) / float(filled)
+        return None
+
     @classmethod
     def parse_from_ccxt_object(
         cls,
@@ -355,7 +371,7 @@ class Order(ModelBase):
             ft_order_side=side,
             ft_pair=pair,
             ft_amount=amount or order.get("amount", None) or 0.0,
-            ft_price=price or order.get("price", None),
+            ft_price=cls.price_from_ccxt(order, price),
         )
 
         o.update_from_ccxt_object(order)

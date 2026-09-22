@@ -345,6 +345,37 @@ def test_get_funding_fees_bitget_hedge_mode(default_conf, mocker):
     assert calc.call_count == 1
 
 
+def test_fill_missing_order_price_bitget(default_conf, mocker):
+    exchange = get_patched_exchange(mocker, default_conf, exchange="bitget")
+
+    filled = {
+        "id": "1",
+        "price": None,
+        "average": None,
+        "filled": 44.0,
+        "cost": None,
+        "info": {"priceAvg": "2.15", "quoteVolume": "94.6"},
+    }
+    filled = exchange._fill_missing_order_price(filled)
+    assert filled["average"] == 2.15
+    assert filled["price"] == 2.15
+
+    from_cost = {
+        "id": "2",
+        "price": None,
+        "average": None,
+        "filled": 10.0,
+        "cost": 25.0,
+        "info": {},
+    }
+    from_cost = exchange._fill_missing_order_price(from_cost)
+    assert from_cost["price"] == 2.5
+    assert from_cost["average"] == 2.5
+
+    untouched = {"id": "3", "price": 1.2, "average": None, "filled": 1, "info": {}}
+    assert exchange._fill_missing_order_price(untouched)["price"] == 1.2
+
+
 def test_dry_run_liquidation_price_cross_bitget(default_conf, mocker):
     default_conf["dry_run"] = True
     default_conf["trading_mode"] = TradingMode.FUTURES

@@ -1992,6 +1992,20 @@ def test_update_order_from_ccxt(caplog, time_machine):
     start = datetime(2023, 1, 1, 4, tzinfo=UTC)
     time_machine.move_to(start, tick=False)
 
+    # Market order with no price: recover from average / cost
+    o_avg = Order.parse_from_ccxt_object(
+        {"id": "m1", "price": None, "average": 2.5, "amount": 4, "filled": 4},
+        "ADA/USDT",
+        "sell",
+    )
+    assert o_avg.ft_price == 2.5
+    o_cost = Order.parse_from_ccxt_object(
+        {"id": "m2", "price": None, "average": None, "amount": 4, "filled": 4, "cost": 10.0},
+        "ADA/USDT",
+        "sell",
+    )
+    assert o_cost.ft_price == 2.5
+
     # Most basic order return (only has orderid)
     o = Order.parse_from_ccxt_object({"id": "1234"}, "ADA/USDT", "buy", 20.01, 1234.6)
     assert isinstance(o, Order)

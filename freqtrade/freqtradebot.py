@@ -545,7 +545,36 @@ class FreqtradeBot(LoggingMixin):
 
                     logger.info(f"Found previously unknown order {order['id']} for {trade.pair}.")
 
-                    order_obj = Order.parse_from_ccxt_object(order, trade.pair, order["side"])
+                    order_price = Order.price_from_ccxt(order)
+                    if not order_price:
+                        try:
+                            detailed = self.exchange.fetch_order(order["id"], trade.pair)
+                            order.update(
+                                {k: v for k, v in detailed.items() if v is not None}
+                            )
+                            order_price = Order.price_from_ccxt(order)
+                        except ExchangeError:
+                            logger.warning(
+                                f"Could not refetch order {order['id']} for {trade.pair} "
+                                "to recover a missing price."
+                            )
+                    if not order_price:
+                        if (order.get("filled") or 0) > 0 and trade.open_rate:
+                            order_price = trade.open_rate
+                            logger.warning(
+                                f"Order {order['id']} for {trade.pair} has no price; "
+                                f"using trade open rate {order_price}."
+                            )
+                        else:
+                            logger.warning(
+                                f"Skipping order {order['id']} for {trade.pair}: "
+                                "missing price (ft_price is required)."
+                            )
+                            continue
+
+                    order_obj = Order.parse_from_ccxt_object(
+                        order, trade.pair, order["side"], price=order_price
+                    )
                     order_obj.order_filled_date = dt_from_ts(
                         safe_value_fallback(order, "lastTradeTimestamp", "timestamp")
                     )
