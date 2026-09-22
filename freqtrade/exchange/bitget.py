@@ -158,18 +158,64 @@ class Bitget(Exchange):
 
         return self._fetch_stop_order_fallback(order_id, pair)
 
+    @retrier
+    def cancel_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
+        if self._config["dry_run"]:
+            return super().cancel_order(order_id, pair, params)
+        if params is None:
+            params = {}
+        try:
+            order = self._api.cancel_order(order_id, pair, params=params)
+            self._log_exchange_response("cancel_order", order)
+            return self._order_contracts_to_amount(order)
+        except ccxt.InvalidOrder as e:
+            raise InvalidOrderException(f"Could not cancel order. Message: {e}") from e
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            # Position TPSL is auto-removed when the position closes.
+            if "25575" in str(e):
+                raise InvalidOrderException(
+                    f"Bitget plan/stoploss {order_id} already gone. Message: {e}"
+                ) from e
+            raise TemporaryError(
+                f"Could not cancel order due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+
     def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
         cancel_params = params.copy() if params else {}
         cancel_params["stop"] = True
 
         if self.trading_mode != TradingMode.FUTURES:
-            return self.cancel_order(order_id, pair, cancel_params)
+            return self._cancel_stoploss_or_gone(order_id, pair, cancel_params)
 
         try:
-            return self.cancel_order(order_id, pair, {**cancel_params, "planType": "pos_loss"})
-        except (InvalidOrderException, IndexError):
+            return self._cancel_stoploss_or_gone(
+                order_id, pair, {**cancel_params, "planType": "pos_loss"}
+            )
+        except InvalidOrderException:
             # Keep compatibility with stoploss orders created by older versions.
-            return self.cancel_order(order_id, pair, cancel_params)
+            return self._cancel_stoploss_or_gone(order_id, pair, cancel_params)
+
+    def _cancel_stoploss_or_gone(self, order_id: str, pair: str, params: dict) -> dict:
+        try:
+            return self.cancel_order(order_id, pair, params)
+        except InvalidOrderException as e:
+            if "25575" not in str(e) and "already gone" not in str(e).lower():
+                raise
+            logger.info(
+                f"Bitget stoploss {order_id} for {pair} is already canceled or consumed."
+            )
+            return {
+                "id": order_id,
+                "status": "canceled",
+                "amount": 0.0,
+                "filled": 0.0,
+                "fee": {},
+                "info": {},
+            }
 
     @retrier
     def additional_exchange_init(self) -> None:
@@ -331,8 +377,16 @@ class Bitget(Exchange):
                 "currency": currency or info.get("marginCoin") or "USDT",
             }
             return
-        if cost is None or abs(float(cost)) == 0:
+        if cost is None:
             order["fee"] = None
+            return
+        cost_abs = abs(float(cost))
+        if cost_abs == 0:
+            order["fee"] = None
+            return
+        # Bitget/ccxt often negate the fee; freqtrade must store a positive cost.
+        fee["cost"] = cost_abs
+        order["fee"] = fee
 
     def get_trades_for_order(
         self, order_id: str, pair: str, since: datetime, params: dict | None = None

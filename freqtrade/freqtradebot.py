@@ -2578,6 +2578,10 @@ class FreqtradeBot(LoggingMixin):
             fee_cost, fee_currency, fee_rate = self.exchange.extract_cost_curr_rate(
                 order["fee"], order["symbol"], order["cost"], order_obj.safe_filled
             )
+            # Some exchanges (Bitget) return fees as a negative debit.
+            fee_cost = abs(fee_cost)
+            if fee_rate is not None:
+                fee_rate = abs(fee_rate)
             logger.info(
                 f"Fee for Trade {trade} [{order_obj.ft_order_side}]: "
                 f"{fee_cost:.8g} {fee_currency} - rate: {fee_rate}"
@@ -2652,6 +2656,9 @@ class FreqtradeBot(LoggingMixin):
                 fee_cost_, fee_currency, fee_rate_ = self.exchange.extract_cost_curr_rate(
                     fee, exectrade["symbol"], exectrade["cost"], exectrade["amount"]
                 )
+                fee_cost_ = abs(fee_cost_)
+                if fee_rate_ is not None:
+                    fee_rate_ = abs(fee_rate_)
                 fee_cost += fee_cost_
                 if fee_rate_ is not None:
                     fee_rate_array.append(fee_rate_)

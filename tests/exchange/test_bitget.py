@@ -112,6 +112,32 @@ def test_cancel_stoploss_order_bitget(default_conf_usdt, mocker):
     )
     exchange.cancel_order.assert_any_call("1234", "ETH/USDT:USDT", {"stop": True})
 
+    # Position close auto-cancels TPSL; Bitget returns 25575 instead of success.
+    exchange.cancel_order = MagicMock(
+        side_effect=InvalidOrderException(
+            'Bitget plan/stoploss 1234 already gone. Message: bitget {"code":"25575"}'
+        )
+    )
+    gone = exchange.cancel_stoploss_order("1234", "ETH/USDT:USDT", {})
+    assert gone["id"] == "1234"
+    assert gone["status"] == "canceled"
+
+
+def test_cancel_order_bitget_stoploss_already_gone(default_conf_usdt, mocker):
+    default_conf_usdt["dry_run"] = False
+    default_conf_usdt["trading_mode"] = TradingMode.FUTURES
+    default_conf_usdt["margin_mode"] = MarginMode.ISOLATED
+    api_mock = MagicMock()
+    api_mock.cancel_order = MagicMock(
+        side_effect=ccxt.ExchangeError('bitget {"code":"25575","msg":"Failed to stop the strategy"}')
+    )
+    exchange = get_patched_exchange(mocker, default_conf_usdt, api_mock, exchange="bitget")
+
+    with pytest.raises(InvalidOrderException, match="already gone"):
+        exchange.cancel_order("1486234472269987906", "WLD/USDT:USDT", {"stop": True})
+    # Must not retry 25575.
+    assert api_mock.cancel_order.call_count == 1
+
 
 def test_bitget_ohlcv_candle_limit(mocker, default_conf_usdt):
     # This test is also a live test - so we're sure our limits are correct.
@@ -402,6 +428,16 @@ def test_normalize_ccxt_order_bitget_fee_and_hedge_side(default_conf, mocker):
     assert real_fee["fee"]["cost"] == 0.012
     assert real_fee["fee"]["currency"] == "USDT"
     assert real_fee["side"] == "buy"
+
+    neg_parsed = {
+        "id": "3",
+        "side": "sell",
+        "price": 1.0,
+        "fee": {"cost": -0.01969, "currency": "USDT"},
+        "info": {"fee": "0"},
+    }
+    neg_parsed = exchange._normalize_ccxt_order(neg_parsed)
+    assert neg_parsed["fee"]["cost"] == 0.01969
 
 
 def test_get_trades_for_order_bitget_hedge_mode_skips_private_history(default_conf, mocker):
