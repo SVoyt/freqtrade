@@ -528,6 +528,8 @@ class FreqtradeBot(LoggingMixin):
             prev_trade_amount = trade.amount
             order_obj: Order | None = None
             for order in orders:
+                if self.exchange.ignore_onexchange_order(order):
+                    continue
                 trade_order = [o for o in trade.orders if o.order_id == order["id"]]
 
                 if trade_order:
@@ -554,7 +556,15 @@ class FreqtradeBot(LoggingMixin):
                         continue
 
                     order_price = Order.price_from_ccxt(order)
-                    if not order_price:
+                    # Trigger/limit often sits in `price` while average (actual fill)
+                    # is only on the detailed order. Refetch market/stop fills without average.
+                    need_fill = (order.get("filled") or 0) > 0 and not order.get("average")
+                    looks_like_trigger = bool(
+                        order.get("stopPrice")
+                        or order.get("type") in ("market", "stoploss", "stop")
+                        or (order.get("info") or {}).get("planType")
+                    )
+                    if not order_price or (need_fill and looks_like_trigger):
                         try:
                             detailed = self.exchange.fetch_order(order["id"], trade.pair)
                             order.update(
@@ -579,6 +589,14 @@ class FreqtradeBot(LoggingMixin):
                                 "missing price (ft_price is required)."
                             )
                             continue
+                    if order_price and (order.get("filled") or 0) > 0:
+                        # Stamp fill onto the ccxt dict so update_trade / safe_price
+                        # cannot fall back to a leftover trigger in `price`.
+                        if not order.get("average"):
+                            order["average"] = order_price
+                        stop = order.get("stopPrice")
+                        if not order.get("price") or (stop and order.get("price") == stop):
+                            order["price"] = order_price
 
                     order_obj = Order.parse_from_ccxt_object(
                         order, trade.pair, ft_side, price=order_price
@@ -599,6 +617,10 @@ class FreqtradeBot(LoggingMixin):
             Trade.session.refresh(trade)
             if not trade.is_open:
                 # Trade was just closed
+                for sl in list(trade.open_sl_orders):
+                    sl.ft_is_open = False
+                    if sl.status in (None, "open"):
+                        sl.status = "canceled"
                 if order_obj:
                     trade.close_date = trade.date_last_filled_utc
                     self.order_close_notify(
@@ -1356,18 +1378,20 @@ class FreqtradeBot(LoggingMixin):
         """
         trades_closed = 0
         for trade in trades:
-            if (
-                not trade.has_open_orders
-                and not trade.has_open_sl_orders
-                and trade.fee_open_currency is not None
-                and not self.wallets.check_exit_amount(trade)
-            ):
+            # Recover even with an open SL / missing fee_open_currency.
+            # Bitget copytrading never fills fee_open_currency (myTrades 40731),
+            # and a consumed TPSL plan stays "open" in the DB while the fill has
+            # a different id — that used to require a manual /reload_trade.
+            if not trade.has_open_orders and not self.wallets.check_exit_amount(trade):
                 logger.warning(
                     f"Not enough {trade.safe_base_currency} in wallet to exit {trade}. "
                     "Trying to recover."
                 )
-                if self.handle_onexchange_order(trade):
-                    # Trade was deleted. Don't continue.
+                deleted = self.handle_onexchange_order(trade)
+                if deleted:
+                    continue
+                if not trade.is_open:
+                    trades_closed += 1
                     continue
 
             try:
@@ -1525,6 +1549,12 @@ class FreqtradeBot(LoggingMixin):
                 )
             except InvalidOrderException as exception:
                 logger.warning("Unable to fetch stoploss order: %s", exception)
+                # Plan already consumed (Bitget 25575 / not found). The fill
+                # lives under a different order id — recover it from fetch_orders.
+                if not self.wallets.check_exit_amount(trade):
+                    self.handle_onexchange_order(trade)
+                    if not trade.is_open:
+                        return True
 
             if stoploss_order:
                 stoploss_orders.append(stoploss_order)

@@ -381,6 +381,13 @@ class Order(ModelBase):
         )
 
         o.update_from_ccxt_object(order)
+        # update_from_ccxt_object copies trigger/limit into `price` and may leave
+        # average empty. safe_price is average → price → stop → ft_price, so a
+        # leftover trigger would close sold_on_exchange at the stop instead of fill.
+        if (o.filled or 0) > 0 and o.ft_price and not o.average:
+            o.average = o.ft_price
+        if o.average and o.stop_price is not None and o.price == o.stop_price:
+            o.price = o.average
         return o
 
     @staticmethod
@@ -963,9 +970,13 @@ class LocalTrade:
                 logger.info(f"{order_type}_{payment} has been fulfilled for {self}.")
 
         elif order.ft_order_side == "stoploss" and order.status not in ("open",):
+            if not self.is_open:
+                # Leftover plan/SL after the fill already closed the trade
+                # (Bitget TPSL). Do not overwrite close_rate / exit_reason.
+                return
             self.close_rate_requested = self.stop_loss
             self.exit_reason = ExitType.STOPLOSS_ON_EXCHANGE.value
-            if self.is_open and order.safe_filled > 0:
+            if order.safe_filled > 0:
                 logger.info(f"{order_type} is hit for {self}.")
         else:
             raise ValueError(f"Unknown order type: {order.order_type}")

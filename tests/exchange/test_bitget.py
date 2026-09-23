@@ -414,6 +414,20 @@ def test_fill_missing_order_price_bitget(default_conf, mocker):
     assert sl_fill["average"] == 0.4475
     assert sl_fill["price"] == 0.4475
 
+    # Trigger-only filled plan: drop price so callers refetch the real fill.
+    trigger_only = {
+        "id": "5",
+        "price": 0.44,
+        "average": None,
+        "filled": 44.0,
+        "cost": None,
+        "stopPrice": 0.44,
+        "info": {},
+    }
+    trigger_only = exchange._fill_missing_order_price(trigger_only)
+    assert trigger_only["price"] is None
+    assert not trigger_only.get("average")
+
 
 def test_normalize_ccxt_order_bitget_fee_and_hedge_side(default_conf, mocker):
     exchange = get_patched_exchange(mocker, default_conf, exchange="bitget")
@@ -471,6 +485,23 @@ def test_ft_order_side_for_trade_bitget_hedge(default_conf, mocker):
         "info": {"tradeSide": "open", "side": "buy", "posMode": "hedge_mode"},
     }
     assert exchange.ft_order_side_for_trade(trade, open_long) == "buy"
+
+    plan = {
+        "id": "plan1",
+        "side": "sell",
+        "type": "limit",
+        "price": 0.44,
+        "average": None,
+        "filled": 44,
+        "info": {"planType": "pos_loss", "tradeSide": "close", "side": "buy"},
+    }
+    assert exchange.ignore_onexchange_order(plan) is True
+    assert exchange.ft_order_side_for_trade(trade, plan) is None
+
+    plan_with_fill = deepcopy(plan)
+    plan_with_fill["average"] = 0.4475
+    assert exchange.ignore_onexchange_order(plan_with_fill) is False
+    assert exchange.ft_order_side_for_trade(trade, plan_with_fill) == "sell"
 
     neg_parsed = {
         "id": "3",

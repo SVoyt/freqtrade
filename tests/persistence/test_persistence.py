@@ -2011,6 +2011,25 @@ def test_update_order_from_ccxt(caplog, time_machine):
         "sell",
     )
     assert o_fill.ft_price == 0.4475
+    assert o_fill.safe_price == 0.4475
+
+    # Recovered fill must win over a leftover trigger in `price` (sold_on_exchange).
+    o_trigger = Order.parse_from_ccxt_object(
+        {
+            "id": "m4",
+            "price": 0.44,
+            "average": None,
+            "amount": 44,
+            "filled": 44,
+            "stopPrice": 0.44,
+        },
+        "WLD/USDT",
+        "sell",
+        price=0.4475,
+    )
+    assert o_trigger.ft_price == 0.4475
+    assert o_trigger.average == 0.4475
+    assert o_trigger.safe_price == 0.4475
 
     # Most basic order return (only has orderid)
     o = Order.parse_from_ccxt_object({"id": "1234"}, "ADA/USDT", "buy", 20.01, 1234.6)

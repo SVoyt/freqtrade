@@ -1448,6 +1448,13 @@ class Exchange:
         """
         return order.get("side")
 
+    def ignore_onexchange_order(self, order: CcxtOrder) -> bool:
+        """
+        Return True if a fetch_orders item must not attach or update a trade.
+        Used for exchange-specific stubs (e.g. Bitget TPSL plan rows).
+        """
+        return False
+
     def _order_needs_price(self, side: BuySell, ordertype: str) -> bool:
         return (
             ordertype != "market"

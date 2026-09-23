@@ -5229,6 +5229,168 @@ def test_handle_onexchange_order_missing_price(
     assert unknown[0].ft_order_side == "sell"
 
 
+@pytest.mark.usefixtures("init_persistence")
+def test_handle_onexchange_order_uses_fill_not_trigger(
+    mocker, default_conf_usdt, limit_order, caplog
+):
+    default_conf_usdt["dry_run"] = False
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    entry_order = limit_order["buy"]
+    trigger_price = entry_order["price"] * 0.98
+    fill_price = entry_order["price"] * 1.01
+    # Plan/trigger first (must be ignored), then the market fill with only trigger in price.
+    plan_order = {
+        "id": "plan-pos-loss",
+        "type": "stoploss",
+        "side": "sell",
+        "price": trigger_price,
+        "average": None,
+        "stopPrice": trigger_price,
+        "amount": entry_order["amount"],
+        "filled": entry_order["amount"],
+        "cost": None,
+        "status": "closed",
+        "remaining": 0.0,
+        "info": {"planType": "pos_loss"},
+    }
+    exit_order = deepcopy(limit_order["sell"])
+    exit_order.update(
+        {
+            "id": "market-fill-id",
+            "type": "market",
+            "side": "sell",
+            "price": trigger_price,
+            "average": None,
+            "cost": None,
+            "status": "closed",
+            "filled": exit_order["amount"],
+            "remaining": 0.0,
+        }
+    )
+    fill_detail = deepcopy(exit_order)
+    fill_detail.update(
+        {
+            "average": fill_price,
+            "price": fill_price,
+            "cost": fill_price * exit_order["amount"],
+        }
+    )
+    mocker.patch(f"{EXMS}.fetch_orders", return_value=[entry_order, plan_order, exit_order])
+    mocker.patch(f"{EXMS}.fetch_order", return_value=fill_detail)
+    mocker.patch.object(
+        freqtrade.exchange,
+        "ignore_onexchange_order",
+        side_effect=lambda o: o.get("id") == "plan-pos-loss",
+    )
+
+    trade = Trade(
+        pair="ETH/USDT",
+        fee_open=0.001,
+        fee_close=0.001,
+        open_rate=entry_order["price"],
+        open_date=dt_now(),
+        stake_amount=entry_order["cost"],
+        amount=entry_order["amount"],
+        exchange="binance",
+        is_short=False,
+        leverage=1,
+    )
+    trade.orders.append(Order.parse_from_ccxt_object(entry_order, trade.pair, "buy"))
+    Trade.session.add(trade)
+    Trade.commit()
+
+    assert freqtrade.handle_onexchange_order(trade) is False
+    assert log_has_re(r"Found previously unknown order market-fill-id", caplog)
+    assert not log_has_re(r"Found previously unknown order plan-pos-loss", caplog)
+
+    trade = Trade.session.scalars(select(Trade)).first()
+    unknown = [o for o in trade.orders if o.order_id == "market-fill-id"]
+    assert len(unknown) == 1
+    assert unknown[0].safe_price == pytest.approx(fill_price)
+    assert trade.is_open is False
+    assert trade.exit_reason == ExitType.SOLD_ON_EXCHANGE.value
+    assert trade.close_rate == pytest.approx(fill_price)
+    assert trade.close_profit > 0
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_exit_positions_recovers_without_reload(
+    mocker, default_conf_usdt, limit_order, caplog
+):
+    """
+    Bitget SL fill + empty myTrades used to skip automatic recovery:
+    open SL + fee_open_currency=None required a manual /reload_trade.
+    """
+    default_conf_usdt["dry_run"] = False
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
+
+    entry_order = limit_order["buy"]
+    fill_price = entry_order["price"] * 1.01
+    exit_order = deepcopy(limit_order["sell"])
+    exit_order.update(
+        {
+            "id": "market-fill-id",
+            "type": "market",
+            "side": "sell",
+            "price": fill_price,
+            "average": fill_price,
+            "cost": fill_price * exit_order["amount"],
+            "status": "closed",
+            "filled": exit_order["amount"],
+            "remaining": 0.0,
+        }
+    )
+    mocker.patch(f"{EXMS}.fetch_orders", return_value=[entry_order, exit_order])
+    mocker.patch.object(freqtrade.wallets, "check_exit_amount", return_value=False)
+    mocker.patch.object(
+        freqtrade.exchange,
+        "fetch_stoploss_order",
+        side_effect=InvalidOrderException("plan gone"),
+    )
+
+    sl = Order(
+        order_id="plan-pos-loss",
+        ft_order_side="stoploss",
+        ft_pair="ETH/USDT",
+        ft_is_open=True,
+        ft_amount=entry_order["amount"],
+        ft_price=entry_order["price"] * 0.98,
+        status="open",
+    )
+    trade = Trade(
+        pair="ETH/USDT",
+        fee_open=0.001,
+        fee_close=0.001,
+        fee_open_currency=None,
+        open_rate=entry_order["price"],
+        open_date=dt_now(),
+        stake_amount=entry_order["cost"],
+        amount=entry_order["amount"],
+        exchange="binance",
+        is_short=False,
+        leverage=1,
+        is_open=True,
+    )
+    trade.orders.append(Order.parse_from_ccxt_object(entry_order, trade.pair, "buy"))
+    trade.orders.append(sl)
+    Trade.session.add(trade)
+    Trade.commit()
+
+    assert trade.has_open_sl_orders is True
+    closed = freqtrade.exit_positions([trade])
+    assert closed == 1
+    assert log_has_re(r".*Trying to recover", caplog)
+    assert log_has_re(r"Found previously unknown order market-fill-id", caplog)
+
+    trade = Trade.session.scalars(select(Trade)).first()
+    assert trade.is_open is False
+    assert trade.exit_reason == ExitType.SOLD_ON_EXCHANGE.value
+    assert trade.close_rate == pytest.approx(fill_price)
+    assert trade.has_open_sl_orders is False
+
+
 def test_get_valid_price(mocker, default_conf_usdt) -> None:
     patch_RPCManager(mocker)
     patch_exchange(mocker)

@@ -120,9 +120,16 @@ class Bitget(Exchange):
         # old stoploss orders
         paramsold = {"stop": True}
         # new stoploss orders with stopLossPrice (used in futures starting 2026.4)
-        paramsnew = {"planType": "profit_loss"}
+        # Hedge/copytrading TPSL is created as pos_loss / pos_profit, not profit_loss.
         params_to_try = (
-            (paramsnew, paramsold) if self.trading_mode == TradingMode.FUTURES else (paramsold,)
+            (
+                {"planType": "profit_loss"},
+                {"planType": "pos_loss"},
+                {"planType": "pos_profit"},
+                paramsold,
+            )
+            if self.trading_mode == TradingMode.FUTURES
+            else (paramsold,)
         )
 
         for params2 in params_to_try:
@@ -287,7 +294,48 @@ class Bitget(Exchange):
                 params["hedged"] = True
         return params
 
+    # Bitget TPSL / trigger plan rows. These carry the trigger in `price` and a
+    # different id from the market fill that actually closes the position.
+    _TRIGGER_PLAN_TYPES = frozenset(
+        {
+            "pos_loss",
+            "pos_profit",
+            "profit_loss",
+            "normal_plan",
+            "track_plan",
+            "moving_plan",
+            "loss_plan",
+            "profit_plan",
+        }
+    )
+
+    def ignore_onexchange_order(self, order: CcxtOrder) -> bool:
+        info = order.get("info") or {}
+        plan = str(info.get("planType") or info.get("plan_type") or "").lower()
+        order_type = str(order.get("type") or "").lower()
+        is_plan = plan in self._TRIGGER_PLAN_TYPES or order_type in {
+            "stoploss",
+            "stop",
+            "take_profit",
+            "stop_market",
+            "take_profit_market",
+        }
+        if not is_plan:
+            return False
+        filled = order.get("filled") or 0.0
+        info_avg = info.get("priceAvg") or info.get("fillPrice")
+        has_fill = bool(order.get("average") or (info_avg not in (None, "", 0, "0", 0.0)))
+        if filled and has_fill:
+            return False
+        logger.info(
+            f"Skipping Bitget trigger/plan order {order.get('id')} "
+            f"(planType={plan or order_type}): not an actual fill."
+        )
+        return True
+
     def ft_order_side_for_trade(self, trade, order: CcxtOrder) -> str | None:
+        if self.ignore_onexchange_order(order):
+            return None
         if not self.hedge_mode:
             return super().ft_order_side_for_trade(trade, order)
 
@@ -353,13 +401,26 @@ class Bitget(Exchange):
                 order["price"] = avg
             return order
 
-        if order.get("price"):
+        if filled and cost:
+            price = float(cost) / float(filled)
+            if price:
+                order["average"] = price
+                order["price"] = price
             return order
 
-        price = (cost / filled) if cost and filled else None
-        if price:
-            order["average"] = price
-            order["price"] = price
+        # Filled plan/stop rows often only have the trigger in `price`.
+        # Clearing it forces handle_onexchange_order to refetch the real fill.
+        stop = order.get("stopPrice") or info.get("triggerPrice") or info.get("executePrice")
+        try:
+            stop_f = float(stop) if stop not in (None, "") else None
+        except (TypeError, ValueError):
+            stop_f = None
+        if filled and stop_f and order.get("price"):
+            try:
+                if float(order["price"]) == stop_f:
+                    order["price"] = None
+            except (TypeError, ValueError):
+                pass
         return order
 
     @staticmethod
