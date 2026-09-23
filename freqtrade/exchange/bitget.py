@@ -287,6 +287,26 @@ class Bitget(Exchange):
                 params["hedged"] = True
         return params
 
+    def ft_order_side_for_trade(self, trade, order: CcxtOrder) -> str | None:
+        if not self.hedge_mode:
+            return super().ft_order_side_for_trade(trade, order)
+
+        info = order.get("info") or {}
+        trade_side = str(info.get("tradeSide") or "").lower()
+        if trade_side == "close" or order.get("reduceOnly"):
+            # Close of this position — always the trade's exit side.
+            return trade.exit_side
+        if trade_side == "open":
+            raw_side = info.get("side") or order.get("side")
+            if raw_side == trade.entry_side:
+                return trade.entry_side
+            logger.info(
+                f"Skipping Bitget hedge-mode {raw_side} open for {trade.pair}: "
+                "opposite position, not this trade."
+            )
+            return None
+        return super().ft_order_side_for_trade(trade, order)
+
     def _get_stop_params(self, side: BuySell, ordertype: str, stop_price: float) -> dict:
         params = super()._get_stop_params(side, ordertype, stop_price)
         if self.trading_mode == TradingMode.FUTURES and self.hedge_mode:
@@ -306,17 +326,13 @@ class Bitget(Exchange):
     @staticmethod
     def _fill_missing_order_price(order: CcxtOrder) -> CcxtOrder:
         """
-        Bitget market / hedge-mode close orders often come back with empty price and
-        priceAvg. Recover average/price/cost from info or cost/filled so persistence
-        can store ft_price.
+        Bitget market / hedge-mode close orders often come back with empty average
+        and a trigger/limit in "price". Prefer priceAvg (actual fill) when filled.
         """
-        if order.get("price") or order.get("average"):
-            return order
-
         info = order.get("info") or {}
-        raw_avg = info.get("priceAvg") or info.get("fillPrice") or info.get("priceAvgPx")
+        raw_avg = order.get("average") or info.get("priceAvg") or info.get("fillPrice")
         try:
-            avg = float(raw_avg) if raw_avg not in (None, "") else None
+            avg = float(raw_avg) if raw_avg not in (None, "", 0, 0.0) else None
         except (TypeError, ValueError):
             avg = None
 
@@ -331,12 +347,19 @@ class Bitget(Exchange):
             if cost:
                 order["cost"] = cost
 
-        price = avg or ((cost / filled) if cost and filled else None)
+        if avg:
+            order["average"] = avg
+            if filled or not order.get("price"):
+                order["price"] = avg
+            return order
+
+        if order.get("price"):
+            return order
+
+        price = (cost / filled) if cost and filled else None
         if price:
-            if not order.get("average"):
-                order["average"] = price
-            if not order.get("price"):
-                order["price"] = price
+            order["average"] = price
+            order["price"] = price
         return order
 
     @staticmethod

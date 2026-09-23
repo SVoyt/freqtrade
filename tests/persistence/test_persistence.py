@@ -2005,6 +2005,12 @@ def test_update_order_from_ccxt(caplog, time_machine):
         "sell",
     )
     assert o_cost.ft_price == 2.5
+    o_fill = Order.parse_from_ccxt_object(
+        {"id": "m3", "price": 0.44, "average": 0.4475, "amount": 44, "filled": 44},
+        "WLD/USDT",
+        "sell",
+    )
+    assert o_fill.ft_price == 0.4475
 
     # Most basic order return (only has orderid)
     o = Order.parse_from_ccxt_object({"id": "1234"}, "ADA/USDT", "buy", 20.01, 1234.6)

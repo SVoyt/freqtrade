@@ -545,6 +545,14 @@ class FreqtradeBot(LoggingMixin):
 
                     logger.info(f"Found previously unknown order {order['id']} for {trade.pair}.")
 
+                    ft_side = self.exchange.ft_order_side_for_trade(trade, order)
+                    if ft_side is None:
+                        logger.info(
+                            f"Skipping order {order['id']} for {trade.pair}: "
+                            "not part of this trade."
+                        )
+                        continue
+
                     order_price = Order.price_from_ccxt(order)
                     if not order_price:
                         try:
@@ -573,14 +581,15 @@ class FreqtradeBot(LoggingMixin):
                             continue
 
                     order_obj = Order.parse_from_ccxt_object(
-                        order, trade.pair, order["side"], price=order_price
+                        order, trade.pair, ft_side, price=order_price
                     )
                     order_obj.order_filled_date = dt_from_ts(
                         safe_value_fallback(order, "lastTradeTimestamp", "timestamp")
                     )
                     trade.orders.append(order_obj)
                     Trade.commit()
-                    trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
+                    if ft_side == trade.exit_side:
+                        trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
 
                 self.update_trade_state(trade, order["id"], order, send_msg=False)
 

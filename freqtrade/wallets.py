@@ -207,9 +207,15 @@ class Wallets:
             size = self._exchange._contracts_to_amount(symbol, position["contracts"])
             collateral = safe_value_fallback(position, "initialMargin", "collateral", 0.0)
             leverage: float | None = position.get("leverage")
+            open_for_pair = Trade.get_trades_proxy(is_open=True, pair=symbol)
             if not leverage:
-                trade = Trade.get_trades_proxy(is_open=True, pair=symbol)
-                leverage = trade[0].leverage if trade else None
+                leverage = open_for_pair[0].leverage if open_for_pair else None
+            # Hedge mode can return long and short for the same symbol. Keep the
+            # side that matches the open freqtrade trade so get_owned() is not
+            # overwritten by the opposite position.
+            wanted_side = open_for_pair[0].trade_direction if open_for_pair else None
+            if wanted_side and position.get("side") not in (None, wanted_side):
+                continue
             unrealized_pnl = float(position.get("unrealizedPnl") or 0.0)  # type: ignore[arg-type]
             _parsed_positions[symbol] = PositionWallet(
                 symbol,

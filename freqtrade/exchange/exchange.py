@@ -1441,6 +1441,13 @@ class Exchange:
             params.update({"reduceOnly": True})
         return params
 
+    def ft_order_side_for_trade(self, trade: Any, order: CcxtOrder) -> str | None:
+        """
+        Map an exchange order to freqtrade entry/exit side for this trade.
+        Return None to ignore the order (e.g. opposite hedge-mode position).
+        """
+        return order.get("side")
+
     def _order_needs_price(self, side: BuySell, ordertype: str) -> bool:
         return (
             ordertype != "market"

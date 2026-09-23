@@ -398,8 +398,21 @@ def test_fill_missing_order_price_bitget(default_conf, mocker):
     assert from_cost["price"] == 2.5
     assert from_cost["average"] == 2.5
 
-    untouched = {"id": "3", "price": 1.2, "average": None, "filled": 1, "info": {}}
+    untouched = {"id": "3", "price": 1.2, "average": None, "filled": 0, "info": {}}
     assert exchange._fill_missing_order_price(untouched)["price"] == 1.2
+
+    # Filled stoploss: keep actual fill, not the trigger price.
+    sl_fill = {
+        "id": "4",
+        "price": 0.44,
+        "average": None,
+        "filled": 44.0,
+        "cost": None,
+        "info": {"priceAvg": "0.4475"},
+    }
+    sl_fill = exchange._fill_missing_order_price(sl_fill)
+    assert sl_fill["average"] == 0.4475
+    assert sl_fill["price"] == 0.4475
 
 
 def test_normalize_ccxt_order_bitget_fee_and_hedge_side(default_conf, mocker):
@@ -428,6 +441,36 @@ def test_normalize_ccxt_order_bitget_fee_and_hedge_side(default_conf, mocker):
     assert real_fee["fee"]["cost"] == 0.012
     assert real_fee["fee"]["currency"] == "USDT"
     assert real_fee["side"] == "buy"
+
+
+def test_ft_order_side_for_trade_bitget_hedge(default_conf, mocker):
+    default_conf["trading_mode"] = TradingMode.FUTURES
+    default_conf["margin_mode"] = MarginMode.ISOLATED
+    default_conf["exchange"]["hedge_mode"] = True
+    exchange = get_patched_exchange(mocker, default_conf, exchange="bitget")
+    trade = MagicMock()
+    trade.pair = "WLD/USDT:USDT"
+    trade.entry_side = "buy"
+    trade.exit_side = "sell"
+
+    close_long = {
+        "side": "buy",
+        "reduceOnly": False,
+        "info": {"tradeSide": "close", "side": "buy", "posMode": "hedge_mode"},
+    }
+    assert exchange.ft_order_side_for_trade(trade, close_long) == "sell"
+
+    open_short = {
+        "side": "sell",
+        "info": {"tradeSide": "open", "side": "sell", "posMode": "hedge_mode"},
+    }
+    assert exchange.ft_order_side_for_trade(trade, open_short) is None
+
+    open_long = {
+        "side": "buy",
+        "info": {"tradeSide": "open", "side": "buy", "posMode": "hedge_mode"},
+    }
+    assert exchange.ft_order_side_for_trade(trade, open_long) == "buy"
 
     neg_parsed = {
         "id": "3",

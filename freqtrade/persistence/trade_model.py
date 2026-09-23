@@ -346,11 +346,17 @@ class Order(ModelBase):
         """
         filled = order.get("filled") or 0.0
         cost = order.get("cost")
+        # Filled market / stoploss orders: prefer average (actual fill) over limit/trigger price.
+        if filled:
+            for candidate in (order.get("average"), price, order.get("price")):
+                if candidate:
+                    return float(candidate)
+            if cost:
+                return float(cost) / float(filled)
+            return None
         for candidate in (price, order.get("average"), order.get("price"), order.get("stopPrice")):
             if candidate:
                 return float(candidate)
-        if cost and filled:
-            return float(cost) / float(filled)
         return None
 
     @classmethod
